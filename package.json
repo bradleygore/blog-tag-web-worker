@@ -1,0 +1,15 @@
+{
+  "name": "blog-taglist",
+  "version": "0.0.0",
+  "description": "Demo for retrieving blog RSS data using Web Worker",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "author": "Bradley Gore",
+  "license": "MIT",
+  "devDependencies": {
+    "http": "0.0.0"
+  }
+}

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head lang="en">
+    <meta charset="UTF-8">
+    <title>Tag Listing Demo for Ghost Blogging Platform</title>
+</head>
+<body>
+    <section class="unique-tags">
+
+        <h2>Unique Tags</h2>
+        <ul id="unique-tags"></ul>
+
+    </section>
+
+    <section class="series-tags">
+
+        <h2>Series Tags</h2>
+        <ul id="series-tags"></ul>
+
+    </section>
+
+
+    <script type="text/javascript">
+        var tagListULs = {
+            unique: document.getElementById('unique-tags'),
+            series: document.getElementById('series-tags')
+        };
+
+        if(!!window.Worker) {
+            var listsLoaded = {
+                unique: false,
+                series: false
+            };
+
+            var tagListWorker = new Worker('tagListWorker.js');
+            var baseURL = [window.location.protocol,'//',window.location.host].join('');
+            var rssURL = [baseURL,'/rss'].join('');
+            var tagURL = [baseURL,'/tag'].join('');
+            tagListWorker.postMessage({url: rssURL, action: 'getUniqueTags'});
+            tagListWorker.postMessage({url: rssURL, action: 'getMatchingTags', match: /-series/g});
+
+
+            tagListWorker.addEventListener('message', function processWorkerMsg(e) {
+                var msg = e.data;
+                switch(msg.action) {
+                    case 'parseXML':
+                        parseXML(msg.content);
+                        break;
+                    case 'uniqueTags':
+                        displayUniqueTags(msg.content);
+                        break;
+                    case 'matchingTags':
+                        displaySeriesTags(msg.content);
+                        break;
+                };
+            });
+
+            /***
+             * @desc        Since the WebWorker doesn't have access to DOMParser,
+             *              we'll have the WebWorker send a message to the main script
+             *              to parse the XML and return the tags
+             */
+            function parseXML(xml) {
+                //here, just put all tags ever...
+                //let the Worker sort them and de-dup them...
+                var allTagsEVAR = [];
+                try {
+                    var xParser, xDoc;
+                    if(window.DOMParser) {
+                        xParser = new DOMParser();
+                        xDoc = xParser.parseFromString(xml, 'text/xml');
+                    } else {
+                        xDoc = new ActiveXObject('Microsoft.XMLDOM');
+                        xDoc.async = false;
+                        xDoc.loadXML(xml);
+                    }
+
+                    //each entry in the RSS feed is in an <item> tag
+                    var items = xDoc.getElementsByTagName('item');
+                    for (var i = 0, len = items.length; i < len; i++) {
+                        var item = items[i];
+
+                        //each <item> contains <category> tag(s) for *EACH* tag
+                        //i.e. <category><![CDATA[someTagName]]></category>
+                        var categories = item.getElementsByTagName('category');
+                        [].map.call(categories, function(cat) {
+                            return cat.childNodes[0].nodeValue;
+                        }).forEach(function(cat) {
+                            allTagsEVAR.push(cat);
+                        });
+                    }
+
+                    console.debug('parseXML allTagsEVAR: ', allTagsEVAR);
+
+                    tagListWorker.postMessage({action: 'tagsParsed', content: allTagsEVAR});
+
+                } catch (e) {
+                    //invalid XML, nothing we can do
+                    tagListWorker.terminate();
+                }
+            }
+
+            /***
+             * @desc                        Takes all unique tags and displays them in an anchor that links to the appropriate page
+             * @param tags{Array{String}}   List of tags used
+             */
+            function displayUniqueTags(tags) {
+                tags = tags.map(function generateTag(t) {
+                    return {
+                        rssUrl: getTagRssUrl(t),
+                        pageUrl: getTagPageUrl(t),
+                        name: titleCaseTag(t)
+                    };
+                });
+
+                populateListWithTags(tagListULs.unique, tags);
+
+                listsLoaded.unique = true;
+                terminateWorker();
+            }
+
+            /***
+             * @desc                        Takes all *-series matching tags and displays them in an anchor that links to the appropriate page
+             * @param tags{Array{String}}   List of tags used
+             */
+            function displaySeriesTags(tags) {
+                tags = tags.map(function generateTag(t) {
+                    return {
+                        rssUrl: getTagRssUrl(t),
+                        pageUrl: getTagPageUrl(t),
+                        name: titleCaseTag(t.replace('-series', ''))
+                    };
+                });
+
+                populateListWithTags(tagListULs.series, tags);
+
+                listsLoaded.series = true;
+                terminateWorker();
+            }
+
+            /***
+             * @desc                    Converts tag slug to title-cased string (i.e. my-tag to My Tag)
+             * @param tag{String}       Raw tag, as came from the RSS Feed XML
+             */
+            function titleCaseTag(tag) {
+                var chunks = tag.split('-');
+                return chunks.map(function (c) {
+                    return c.charAt(0).toUpperCase() + c.slice(1);
+                }).join(' ');
+            }
+
+            /***
+             * @desc                    Populates the appropriate RSS url for the tag
+             * @param tag{String}       Raw tag, as came from the RSS Feed XML
+             */
+            function getTagRssUrl(tag) {
+                return [rssURL, '/', tag].join('');
+            }
+
+            /***
+             * @desc                    Populates the appropriate URL for viewing items with that tag
+             * @param tag{String}       Raw tag, as came from the RSS Feed XML
+             */
+            function getTagPageUrl(tag) {
+                return [tagURL,'/',tag].join('');
+            }
+
+            /***
+             * @desc                        Updates/Adds LI elements within the list to include all the information in the tags list
+             * @param ul{HTMLElement}       The UL/OL element to update with the tags
+             * @param tags{Array{Object}}   List of tags to add to the UL.  Format is {url: 'http://someURL.com', name: 'My Tag'}
+             */
+            function populateListWithTags(ul, tags) {
+                tags.forEach(function (t, idx) {
+                    var li = ul.querySelectorAll('li')[idx];
+                    if(!li) {
+                        li = document.createElement('LI');
+                        ul.appendChild(li);
+                    }
+                    var a = li.querySelector('a');
+                    if(!a) {
+                        a = document.createElement('A');
+                        li.appendChild(a);
+                    }
+
+                    a.href = t.pageUrl;
+                    a.text = t.name;
+                });
+            }
+
+            /***
+             * @desc    Once all processes have been finished, terminate the worker so that it's not consuming resources
+             */
+            function terminateWorker(){
+                if(listsLoaded.unique && listsLoaded.series) {
+                    tagListWorker.terminate();
+                }
+            }
+
+        } else {
+            //not supported
+            tagListULs.unique.style.display = 'none';
+            tagListULs.series.style.display = 'none';
+        }
+    </script>
+</body>
+</html>

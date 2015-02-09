@@ -1,0 +1,1520 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/"
+     xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+    <channel>
+        <title><![CDATA[Bradley Gore Blog]]></title>
+        <description>
+            <![CDATA[This is a repository of thoughts, solutions, and (hopefully) helpful tidbits of software development goodness.  ]]></description>
+        <link>http://www.blog.bradleygore.com/</link>
+        <generator>Ghost 0.5</generator>
+        <lastBuildDate>Sat, 07 Feb 2015 00:04:47 GMT</lastBuildDate>
+        <atom:link href="http://www.blog.bradleygore.com/rss/" rel="self" type="application/rss+xml"/>
+        <ttl>60</ttl>
+        <item>
+            <title><![CDATA[Creating Collection Indexes (Look-ups)]]></title>
+            <description><![CDATA[<p>I would imagine that every developer out there has worked, or will soon work, with collections of objects.  I would also imagine that the technique I'm going to go over isn't anything new to most folks.  However, I was going over some of my JavaScript code with a more associate-level developer the other day, and this concept was entirely new to him and seemed to have made a decent impact on him and how he approaches collections now.  So, I thought that if it helped one person, it may help another!  If it does, that's all that matters to me :)</p>
+
+<hr>
+
+<h3 id="thescenario">The Scenario</h3>
+
+<p>Let's say we're building an application that gets data from an API over HTTP (i.e. a RESTful service).  We're building a UI that is responsible for displaying information to the user based on the data the API sends us.  Let's take a classical example of an <code>order</code> and a <code>customer</code> for our object types.  Here's what the API gives when we submit a <code>GET</code> request for each:</p>
+
+<pre><code class="language-javascript">// GET /some/api/orders returns:
+[
+    // one order in the collection
+    {
+        id: 12345,
+        date: '01/24/2014',
+        customer_id: 1,
+        items: [
+            {
+                item_id: 21,
+                quantity: 2
+               }
+        ],
+        subtotal: 150.00
+        total: 164.73
+    }, //many orders follow...
+]
+
+// GET /som/api/customers returns: 
+[
+    // one customer in the collection
+    {
+        id: 21,
+        first_name: 'Jill',
+        last_name: 'Jones',
+        shipping_address: '123 N. Sweet St. Nashville, TN 37211'
+    }, //many customers follow...
+]
+</code></pre>
+
+<p>Now, let's say that part of our web app was to show a list of recent orders and the fields we wanted to display were <code>order.date</code>, <code>order.total</code>, <code>customer.first_name</code>, and <code>customer.last_name</code>.  As you can see, the API is returning reference fields for things like the <code>customer</code> that placed the <code>order</code>, so we have to essentially <code>join</code> those items together ourselves :)</p>
+
+<hr>
+
+<h3 id="oneapproachnestediterators">One Approach - Nested Iterators</h3>
+
+<p>One common approach is to iterate through all orders by using the <code>Array.map</code> function and populate a <code>customerName</code> property onto each order by finding the <code>customer</code> by the referenced <code>order.customer_id</code> field.  We can do this with the <code>Array.filter</code> method on the <code>customer</code> collection - but make no mistake, this is a nested iterator.  This is easy, and with small collections may be quick enough. <br>
+<em>Note: The assumption here is that each object has a unique ID - which is pretty standard.</em></p>
+
+<pre><code class="language-javascript">var allOrders, allCustomers;
+
+//assume the allCustomers and allOrders variables were populated with 
+//    the response from the API - leaving out promises/callbacks for succinctness...
+allCustomers = customerSvc.getListFromAPI();  
+allOrders = ordersSvc.getListFromAPI();
+
+//populate the Customer object onto each Order
+allOrders = allOrders.map(function populateCustomer(order){
+
+    var customerMatches = allCustomers.filter(function findById(customer){
+        return customer.id === order.customer_id;
+    });
+
+    if(customerMatches.length &gt; 0) {
+        //get the first match (should only be 1 b/c of unique ID fields)
+        //and populate its onto the order
+        var match = customerMatches[0];
+        order.customerName = match.first_name + ' ' + match.last_name;
+    } else {
+        //somehow have an unknown customer
+        order.customerName = 'UNKNOWN CUSTOMER!!!!';
+    }
+
+    //return the modified order object
+    return order;
+});
+</code></pre>
+
+<p>And that works.  However, look at what we're doing - <em>for every single item in a collection, we're iterating through the items in a separate collection to find a match</em>!  This is a big deal and with even moderately-sized collections it can add up to huge impacts to performance!</p>
+
+<hr>
+
+<h3 id="whatsthebigdeal">What's The Big Deal?</h3>
+
+<p>Let's say that we have 100 unique <code>customer</code> records, and a total of 2500 unique <code>order</code> records.  With the nested iterator approach, we start off iterating over all <code>order</code> records.  That automatically puts our count of total iterations up to 2500.  Inside of that initial iterator, we are then looking to see if any records in the <code>customer</code> collection have a matching <code>id</code>.  So, we iterate over 100 <code>customer</code> records <strong>in each iteration</strong>!  That's a ton of work!  Now, our total count becomes 2500 + (2500 * 100), or <strong>252,500 total iterations</strong>!!</p>
+
+<hr>
+
+<h3 id="abetterway">A Better Way</h3>
+
+<p>Since we already know that each <code>customer</code> has a unique <code>id</code>, why not create a pivoted view of the collection that allows us to more easily find each <code>customer</code> by their <code>id</code> <strong>without having to filter the collection each time</strong>?  Here's how easy this is:</p>
+
+<pre><code class="language-javascript">//create a quick object that will hold our pivoted view
+var _customersById = {};
+
+//iterate *once* over the full customer list to populate the pivoted view 
+//    (or index, look-up, whatever you prefer to call this :)
+allCustomers.forEach(function populatePivotView(customer){  
+    _customersById[customer.id] = customer;
+});
+
+//So simple, but what we've essentially created is something like this.
+//Notice how the objects *property* is the same as its value's *id* field!
+/*
+{
+    21: {id: 21, first_name: 'Bob', last_name: 'Smith', ...},
+    354: {id: 354, first_name: 'Rachel', last_name: 'Rayne', ...},
+    86: {id: 86, first_name: 'Jon', last_name: 'Jones', ...},
+    215: {id: 215, first_name: 'Ashleigh', last_name: 'Riggs', ...}
+}
+*/
+</code></pre>
+
+<p><em>Note: With JavaScript, you can dynamically add properties like this, and object property names can be numbers.  This technique may need to be adjusted to fit other languages :)</em></p>
+
+<p>Perfect - we now have an object that makes it super easy to find a <code>customer</code> by its <code>id</code> field.  Now, let's use this look-up object to help us populate the <code>customerName</code> property onto each <code>order</code> object!</p>
+
+<pre><code class="language-javascript">//remember, we now have allOrders, allCustomers, and _customersById variables populated
+
+//still going to use .map to populate the field, 
+//    as it's a nice clean way of modifying objects in a collection
+allOrders = allOrders.map(function populateCustomerName(order){  
+    //find the customer by the customer_id field on the order object
+    var customer = _customersById[order.customer_id];
+
+    if(customer) {
+        order.customerName = customer.first_name + ' ' + customer.last_name;
+    } else {
+        order.customerName = 'UNKNOWN CUSTOMER!!!!';
+    }
+    //return the modified object
+    return order;
+});
+</code></pre>
+
+<p>And that's going to end up giving us the same result-set, but will actually be a whole lot less work for the CPU.  Here's how our iteration counts break down now: 100 for when we iterated over the <code>customer</code> collection to create the <code>_customersById</code> look-up object.  2500 for when we iterated over the <code>order</code> collection to populate the <code>customerName</code> property.  That's it - no nested iterations here!  So, our grand total is 100 + 2500 = 2600.  That's a huge difference!</p>
+
+<h3 id="sohowdoyoudoit">So, How Do You Do It?</h3>
+
+<p>As I said earlier - this technique isn't profound or earth-shattering in any way.  However, it is also not something they cover in school so may be helpful to someone, somewhere :)  </p>
+
+<p>This is just one of many different techniques for this type of data manipulation.  Have a way you prefer over a look-up object, or a way that is better?  Please don't hesitate to share your way in the comments - I'm always up for learning new techniques ;-)</p>]]></description>
+            <link>http://www.blog.bradleygore.com/2015/01/24/collection-indexes-look-ups/</link>
+            <guid isPermaLink="false">fec9ab28-f03f-497b-ada3-6f06baa983f0</guid>
+            <category><![CDATA[javascript]]></category>
+            <dc:creator><![CDATA[Bradley Gore]]></dc:creator>
+            <pubDate>Sat, 24 Jan 2015 18:00:00 GMT</pubDate>
+        </item>
+        <item>
+            <title><![CDATA[Going Fullscreen with Angular Directives]]></title>
+            <description><![CDATA[<p>I recently ran across a very nice post on the HTML5 Fullscreen API on <a href="http://davidwalsh.name/fullscreen">David Walsh's Blog</a> and saw an opportunity for incorporating this functionality into an Angular app, utilizing the notion of directive controllers and child directives.  Considering David's post does such an excellent job explaining how the Fullscreen API works, please read it first if you're not familiar with this API.</p>
+
+<p><button class="btn btn-demo"><a href="http://www.blog.bradleygore.com/fullscreen-angular-directives-demo/">DEMO</a></button></p>
+
+<hr>
+
+<h3 id="parentdirectiveanditscontroller">"Parent" Directive and its Controller</h3>
+
+<p>The first thing we need to understand is our strategy in using this API and why a directive (or set of directives, in this case) may be a good fit.  </p>
+
+<p>Angular directives are very powerful - they can add functionality to an existing scope, create their own isolated scope, and even communicate with each other by requiring each others' <code>controller</code>.  For more detailed information on how this works, check out the <a href="https://docs.angularjs.org/guide/directive">Angular docs on directives</a>; near the bottom of the page you'll see the section on "Creating Directives that Communicate".</p>
+
+<p>Considering that we can create our directives in such a way that they can communicate with each other, one strategy we could use for incorporating the Fullscreen API is to apply a "parent" directive to the outer-most element of a particular section that should be able to go fullscreen, and have another element inside of that element that has a "child" directive applied to it for toggling fullscreen state.  The parent directive will expose a function on its controller to initiate the fullscreen state, which the child directive will use when the toggle is activated. There will also be an event handler exposed from the parent directive so that the child directive can react whenever the container's fullscreen status changes. </p>
+
+<p><em>Note: It's not necessary to break these up into two separate directives.  But, it is simple enough functionality that it makes for a good example to show how this works.</em></p>
+
+<pre><code class="language-javascript">(function(d,ng){
+    ng.module('demo').directive('fullscreenContainer', fullscreenContainer);
+
+    function fullscreenContainer(){
+        //Notice that we're not doing an isolate scope here - there's really no reason to.
+        var directiveCfg = {
+            restrict: 'EA',
+            controller: fullscreenContainerCtrl
+        };
+
+        function fullscreenContainerCtrl($scope, $element, $attrs){
+            //get a handle to the native DOM element
+            var el = $element[0];
+            //alias "this" for use in event handlers, etc...
+            var thisCtrl = this;
+
+            var fullScreenState = {
+                isFullScreen: false
+            };
+
+            //add in a hook in case the child directive wants to react
+            //when this element enters/exits fullscreen state
+            //note we're adding the property to "this" and not $scope
+            thisCtrl.onFullScreenChange = null;
+
+            //populate whether the fullscreen API is even supported
+            fullScreenState.canDoFullScreen = d.fullscreenEnabled || 
+                d.webkitFullscreenEnabled || 
+                d.mozFullScreenEnabled || 
+                d.msFullscreenEnabled;
+
+            if(fullScreenState.canDoFullScreen) {
+                //get the function on the element for making it fullscreen
+                //currently, still varied by vendor
+                var fullScreenFn = 
+                    (el.requestFullscreen &amp;&amp; 'requestFullscreen') ||
+                    (el.mozRequestFullScreen &amp;&amp; 'mozRequestFullScreen') ||
+                    (el.webkitRequestFullscreen &amp;&amp; 'webkitRequestFullscreen') ||
+                    (el.msRequestFullscreen &amp;&amp; 'msRequestFullscreen');
+
+                //again, expose a method so that the child directive can access it
+                thisCtrl.makeElementFullScreen = function() {
+                    el[fullScreenFn]();
+                };
+
+                //document emits an event when fullscreen state changes
+                //also still varied by vendor
+                var fsChangeFns = [
+                    'fullscreenchange', 
+                    'webkitfullscreenchange', 
+                    'mozfullscreenchange', 
+                    'MSFullscreenChange'
+                ];
+
+                //add event listener for each of those events
+                fsChangeFns.forEach(function addFullScreenChangeEvtListener(fsEvtName){
+                    d.addEventListener(fsEvtName, fsChanged);
+                });
+
+                function fsChanged(evt){
+                    //Obtain the fullscreen element (if there is one)
+                    //again, varies by vendor
+                    var fullScreenEl = d.fullscreenElement ||
+                        d.webkitFullscreenElement ||
+                        d.mozFullScreenElement ||
+                        d.msFullscreenElement;
+
+                    var oldState = fullScreenState.isFullScreen;
+                    fullScreenState.isFullScreen = (fullScreenEl &amp;&amp; fullScreenEl === el);
+                    if(oldState !== fullScreenState &amp;&amp; typeof thisCtrl.onFullScreenChange === 'function') {
+                        //if the child directive provided a callback, invoke it and provide the new state
+                        thisCtrl.onFullScreenChange(fullScreenState.isFullScreen);
+                    }                    
+                 }
+            } else {
+                //here, we could have a fallback for when the FullScreen API isn't supported
+                //maybe absolutely position the element, add a backdrop, w/e
+            }
+        }
+
+        return directiveCfg;
+    }
+})(document, angular);
+</code></pre>
+
+<hr>
+
+<h3 id="childdirectiveandrequiringtheparent">"Child" Directive and Requiring the "Parent"</h3>
+
+<p>Now that we have the directive that will take care of implementing <em>how</em> we toggle the fullscreen state on the DOM element, we need something that triggers <em>when</em> this happens.  This is going to be a super simple directive, as it only does two things: 1) <em>invoke</em> the fullscreen state and 2) <em>react</em> when the fullscreen state changes.</p>
+
+<pre><code class="language-javascript">(function(d, ng){
+    ng.directive('fullscreenToggle', fullscreenToggle);
+
+    function fullscreenToggle(){
+        return {
+            restrict: 'EA',
+            //here's where we "require" the controller of the fullscreenContainer directive!
+            //prefixed symbols, such as "^", are essentially telling angular where to look for the required controller 
+            //i.e. on same element, on a parent element, etc...
+            require: '^fullscreenContainer',
+            //Now, if the required controller is found, it's passed into the arguments for the link function!
+            link: function(scope, element, attrs, fullscreenContainerCtrl) {
+                //we only care to attach event handlers, etc.. 
+                //if the parent ctrl has the "makeElementFullScreen" function defined
+                if(typeof fullscreenContainerCtrl.makeElementFullScreen === 'function') {
+                    //wire up event handler for when the element is clicked
+                    element.on('click', function fullscreenToggleClicked() {
+                        fullscreenContainerCtrl.makeElementFullScreen();
+                    });
+                    //also populate the callback function for when fullscreen state changes
+                    fullscreenContainerCtrl.onFullScreenChange = function fullscreenStateChanged(isFullScreen) {
+                        //if this element's ancestor is fullscreen, hide the toggle
+                        if(isFullScreen){
+                            element.hide();
+                        } else {
+                            element.show();
+                        }                        
+                    };                    
+                } else {
+                    //then there is no method for making the ancestor fullscreen - either API or fallback...
+                    element.hide();
+                }
+            }
+        };
+    }
+})(document, angular);
+</code></pre>
+
+<hr>
+
+<p>As I mentioned earlier, it isn't necessary to use two separate directives for this functionality.  However, one benefit would be that you could potentially have multiple triggers that are simple to implement and just require the same parent directive.  Maybe one piece of content is made fullscreen by a click, while another is made fullscreen by a specific key command, and another by pinch/zoom gestures on a touch device.  </p>
+
+<p>One other small detail I wanted to mention is with regards to styling the elements when they are in fullscreen state.  This can be done with the following <em>pseudo-selectors</em>: <code>:-webkit-full-screen</code>, <code>:-moz-full-screen</code>, <code>:-ms-fullscreen</code>, <code>:full-screen</code>, and <code>:fullscreen</code>.  One thing I found odd when styling these elements is that the styles wouldn't work if I comma-separated the selectors into a single CSS rule - I <em>had</em> to use them individually for them to work properly.  Other than that, seems to work pretty nicely in modern browsers!</p>
+
+<p>Check out the <button class="btn btn-demo"><a href="http://www.blog.bradleygore.com/fullscreen-angular-directives-demo/">DEMO</a></button>, and share your thoughts in the comments!</p>]]></description>
+            <link>http://www.blog.bradleygore.com/2015/01/04/html5-fullscreen-api-angular-directives/</link>
+            <guid isPermaLink="false">676a01ae-b377-48be-b060-d9fb275d9708</guid>
+            <category><![CDATA[angular]]></category>
+            <category><![CDATA[directives]]></category>
+            <dc:creator><![CDATA[Bradley Gore]]></dc:creator>
+            <pubDate>Sun, 04 Jan 2015 22:19:00 GMT</pubDate>
+        </item>
+        <item>
+            <title><![CDATA[Angular Unit Testing part 2 - $modal]]></title>
+            <description><![CDATA[<p>I've been working a lot with <a href="http://angular-ui.github.io/">Angular UI</a> in a current project and have utilized their <a href="http://angular-ui.github.io/bootstrap/#/modal">$modal</a> functionality a bit.  I found myself writing unit tests for controllers used with the modals, and so I wrote a test helper for this purpose.</p>
+
+<p>In a <a href="http://www.blog.bradleygore.com/2014/09/18/angular-unit-testing-pt-1-local-storage/">prior post</a> I went over one strategy I use for creating unit test helpers.  I'll be employing that same strategy here so I won't be repeating the steps for getting started.  If you need help with setting up your test helpers, please refer to that post.</p>
+
+<hr>
+
+<h3 id="createthehelper">Create The Helper</h3>
+
+<p>At the root of the project, have a directory name <em>test-helpers</em> where our test helpers go.  We're going to write a helper that will generate a mock of the <code>$modalInstance</code> object with spies included - this is passed into the modal's controller, but is also accessible by the code that generates the modal.  For instance, if I created a modal like this:</p>
+
+<pre><code class="language-javascript">/*modalInstance gets injected into the controller MyModalCtrl 
+    it's an object shared between the two scopes 
+        (this current scope, and the scope of the modal's controller)
+*/
+var modalInstance = $modal.open({  
+      templateUrl: 'path/to/template.html',
+      controller: 'MyModalCtrl'
+    });
+</code></pre>
+
+<p>Then I can get a handle to that modalInstance object injected into <code>MyModalCtrl</code> like this:</p>
+
+<pre><code class="language-javascript">angular.module('app.core').controller('MyModalCtrl', function($scope, $modalInstance) {  
+    //$modalInstance is a reference to the same 'modalInstance' object that was returned by calling $modal.open({...}) in the snippet above
+});
+</code></pre>
+
+<p>Since our unit test is to test the modal's controller, we'll just create our own version of <code>$modalInstance</code> to pass in when instantiating the controller during the test.  Let's code up the helper!</p>
+
+<pre><code class="language-javascript">(function(self) {
+    /**
+     * @desc    - Creates a mock of the $modalInstance object that the $modal service would typically use when creating a $modal so that we can intercept and spy on methods.
+     * @returns {close: function, dismiss: function, result: {then: function, catch: function}}
+     * @remarks - close and dismiss are jasmine spies.  
+     *                 result emulates a promise, so the 'then' and 'catch' are spies that accept function callbacks 
+                     if 'then' and 'catch' callbacks provided, they will be called by 'close' and 'dimsiss', respectively
+     */
+    self.mockModalInstance = function() {
+        return {
+            close: jasmine.createSpy('modalInstance.close').andCallFake(function (data) {
+                if(this.result.confirmCB &amp;&amp; typeof this.result.confirmCB === 'function') {
+                    this.result.confirmCB(data);
+                }
+            }),
+            dismiss: jasmine.createSpy('modalInstance.dismiss').andCallFake(function (reason) {
+                if(this.result.cancelCB &amp;&amp; typeof this.result.cancelCB === 'function') {
+                    this.result.cancelCB(reason);
+                }
+            }),
+            result: {
+                then: jasmine.createSpy('modalInstance.result.then').andCallFake(function (confirm, cancel) {
+                    this.confirmCB = confirm || this.confirmCB;
+                    this.cancelCB = cancel || this.cancelCB;
+                }),
+                catch: jasmine.createSpy('modalInstance.result.catch').andCallFake(function (cb) {
+                    this.cancelCB = cb || this.cancelCB;
+                })
+            }
+        };
+    };
+}((module || {}).exports || window));
+</code></pre>
+
+<hr>
+
+<h3 id="usethehelperinourtest">Use the helper in our Test</h3>
+
+<p>Now that we have our helper, we just need to write up a test for our controller, and use the helper.  Here's the the test file, named <em>MyModalCtrl-spec.js</em>:</p>
+
+<pre><code class="language-javascript">describe('MyModalCtrl Functionality', function(){  
+    beforeEach(module('app.core'));
+
+    //variables accessible for the entire suite of tests
+    var scope, controller, modalInstance;
+
+    //inject the items we need to populate the variables
+    beforeEach(inject(function($rootScope, $controller){
+        scope = $rootScope.$new(); //get a new scope
+        modalInstance = window.mockModalInstance(); //Using our test helper ;-)
+        //Here, we make the controller and pass in the $modalInstance dependency
+        //$controller taks in name as first parameter, and object hash of resolved dependencies as second parameter.
+        controller = $controller('MyModalCtrl', {
+            $scope: scope,
+            $modalInstance: modalInstance
+        });
+    }));
+
+    //Quick test - let's say that there's a method on the controller called 'close' that invokes $modalInstance.close($scope.result)
+    it('should call the modalInstance.close method on $scope.close', function(){
+        scope.result = {name: 'Test Result'};
+
+        //We can also add a callback to the modalInstance.result (which is a promise)
+        var callback = jasmine.createSpy('success.callback');
+        modalInstance.result.then(callback);
+
+        //calling scope.close should call close on the scope's $modalInstance reference, and $modalInstance should invoke the appropriate callback on close
+        scope.close();
+        expect(modalInstance.close).toHaveBeenCalledWith(scope.result);
+        //callback should've also been called
+        expect(callback).toHaveBeenCalledWith(scope.result);
+    });
+});
+</code></pre>
+
+<p>And it's that simple!  Our helper keeps us from having to mock out the <code>$modalInstance</code> on every test spec file, and it also comes with spies so that we can track everything about it.  If you're building an app with multiple <code>$modal</code>s and finding yourself repeatedly stubbing out the <code>$modalInstance</code> to test those controllers, this is a good approach for speeding that process up!</p>]]></description>
+            <link>http://www.blog.bradleygore.com/2014/11/01/angular-unit-testing-pt-2-modal/</link>
+            <guid isPermaLink="false">02e6ad31-78f5-40e4-84d6-d04ced759ef1</guid>
+            <category><![CDATA[jasmine]]></category>
+            <category><![CDATA[angular-unit-testing-series]]></category>
+            <category><![CDATA[angular-ui]]></category>
+            <category><![CDATA[$modal]]></category>
+            <dc:creator><![CDATA[Bradley Gore]]></dc:creator>
+            <pubDate>Sat, 01 Nov 2014 17:52:35 GMT</pubDate>
+        </item>
+        <item>
+            <title><![CDATA[Everyday Grunt - Custom Tasks For The Common Code]]></title>
+            <description><![CDATA[<p>I like things that make my life easier.  I'm <del>lazy</del><em>efficient</em>, so it bothers me to do the same task repetitively when it's something I can automate.  </p>
+
+<p><a href="http://gruntjs.com/">Grunt</a> is a useful tool for those kinds of tasks.  You can create custom tasks that handle things for you that you <strong>could</strong> do over and over... but c'mon, do you really <strong>want</strong> to?</p>
+
+<p>Here are the specific examples we'll be covering:</p>
+
+<ul>
+<li>Using <a href="http://diveintohtml5.info/offline.html">HTML5 Application Cache Manifest</a> and want the cache manifest file to change on every build so that I always get the latest files loaded in the browser.  This includes live reload of the app from the <a href="https://github.com/gruntjs/grunt-contrib-watch">Grunt Watch</a> task.</li>
+<li>Adjusting the URL paths to font files from a vendor css file after doing a prod build (i.e. FontAwesome Fonts or Bootstrap Glyphicons)
+<ul><li>You'd want to do this if you are changing the structure in your build when you copy vendor files over.  Maybe you have a few different themes (i.e. made with <a href="http://bootswatchr.com/">BootSwatchr</a>), each with their own bootstrap.css file.  The CSS file at <code>styles/themes/theme1/bootstrap.css</code> may use fonts at <code>styles/fonts/glyphicons-halflings...</code>.  So, we'll want to update the bootstrap.css files for each theme to correctly path to the fonts: <code>url('../../fonts/....')</code> instead of <code>url('../fonts/...')</code>.  This way we only have our fonts in 1 location, instead of having them in with each theme.</li></ul></li>
+</ul>
+
+<hr>
+
+<h3 id="applicationcachemanifest">Application Cache Manifest</h3>
+
+<p>When you're using Application Cache to cache all your app files on the browser, the only way the browser knows to pull down new files is to see if the cache manifest file changed.  When you're running the application locally, this can be annoying to have to change it each time you make a small change in order to see it take effect.  Let's create a Grunt task to do this for us!</p>
+
+<h5 id="createanewgrunttask">Create A New Grunt Task</h5>
+
+<p>In <a href="http://www.blog.bradleygore.com/2014/09/28/clean-up-your-gruntfile/">a prior post</a>, I wrote about organizing your Grunt task config files.  In that post, our structure was like this: <code>/grunt-tasks/configs</code> for the config objects for each task.  We can now use this same main directory to put our custom tasks!  So, create a new javascript file in the grunt-tasks directory and name it accordingly.  For example: <code>/grunt-tasks/appCache.js</code>.  Note that we have to tell Grunt to load the custom tasks from here by putting this in our gruntfile: <code>grunt.loadTasks('grunt-tasks');</code>.</p>
+
+<p>The goal of this file is simply to modify our cache manifest file so that the browser sees it was changed and pulls down all files anew.  This can simply be done in a comment (a line starting with a hash) that we always update to the current timestamp.  Here's what that looks like:</p>
+
+<pre><code class="language-javascript">//appCache.js
+module.exports = function(grunt) {  
+    //register the task.  Params are: Name, [Description], Function to run
+    grunt.registerTask("appCache", 
+        "Updates a timestamp in cache.manifest to force browser to pull all files anew", 
+        function () {
+        //tell grunt to not continue on to other tasks until this one is done
+        var done = this.async();
+        var now = (new Date()).toUTCString();
+        grunt.log.writeln("Updating AppCache Timestamp to NOW: ", now);
+        //Use Grunt's file utils to read in the file
+        var appCache = grunt.file.read('cache.manifest');
+        //look for the comment line that holds our timestamp
+        var timeStampIdx = appCache.indexOf('#TIMESTAMP:');
+        var updatedFile;
+        if(timeStampIdx === -1) {
+            //comment doesn't exist, so add it to the bottom
+            updatedFile = appCache + '\n#TIMESTAMP:' + now;
+        } else {
+            //comment exists, so update it with the current timestamp
+            updatedFile = appCache.substring(0, timeStampIdx + '#TIMESTAMP:'.length) + now;
+        }
+        //use Grunt's file util to write the file
+        grunt.file.write('cache.manifest', updatedFile);
+        //tell Grunt we're done and it can continue
+        //mostly for when using grunt watch so the app doesn't refresh before this is done updating the file.
+        done();
+    });
+};
+</code></pre>
+
+<h5 id="usethenewtask">Use The New Task</h5>
+
+<p>Now that we have our task defined, let's use it!  First, let's add this to our build process.  Find the config file for your build task, and then add this task into the list:  <code>grunt.registerTask('build', ['task1', 'task2', ... 'appCache']);</code>  Now, any time we type <code>grunt build</code> in the terminal, our cache manifest file will be updated with the latest timestamp.</p>
+
+<p>What about when the app reloads due to the grunt watch task?  I'm glad you asked - it's actually really simple thanks to being able to add an event handler on the "watch" event!  I typically just put my "watch" event handler at the bottom of my gruntfile:</p>
+
+<pre><code class="language-javascript">//gruntfile.js
+...
+    grunt.event.on('watch', function(action, filePath) {
+        //react to the watch event with running additional tasks, etc...
+        //tell grunt to run the appCache task
+        grunt.task.run('appCache');
+    });
+...
+</code></pre>
+
+<hr>
+
+<h3 id="themedbootstrapcssfiles">Themed Bootstrap CSS Files</h3>
+
+<p>Our next example is just to make all of our bootstrap.css files within our various style theme directories to all use a single set of glyphicons.</p>
+
+<h5 id="createanewcustomgrunttask">Create A New Custom Grunt Task</h5>
+
+<p>Back in our <em>grunt-tasks</em> directory, let's create a new file: <code>grunt-tasks/bootstrapFonts.js</code>.  </p>
+
+<p>This file will be less code, but is a bit more interesting than the last one.  We basically want to go through all of our folders in <code>styles/themes/</code> directory and update the font url path for any files whose name contains <code>bootstrap</code> and <code>.css</code>.  The assumption here is that files made with a themeroller for Bootstrap will need to be named such that "bootstrap" is in the name (i.e. <em>bootstrap-steelBlue.css</em>), this way they are easy to identify from custom stylesheets in the same directory.</p>
+
+<pre><code class="language-javascript">//bootstrapFonts.js
+module.exports = function(grunt) {  
+    //We're structuring out the bootstrap fonts away from each theme folder, so there's only one copy of the fonts.
+    //So, we need to update the boostrap url references pointing to those fonts to go to the appropriate place rather than the bootstrap default.
+    grunt.registerTask('bootstrapFonts', 
+        'Helper to update the font-face urls in bootstrap files for our themes', 
+        function bootstrapFontsFn() {
+
+        var done = this.async();
+        //use Grunt's file util to recurse through all items in our dist/styles/themes directory 
+        //where our compiled css files are concatenated, minified, and copied to during build
+        grunt.file.recurse('dist/styles/themes/', function updateBootstrapFontUrl(absPath, rootDir, subDir, fileName){
+            //check to make sure the file meets our requirements
+            if(fileName.indexOf("bootstrap") !== -1 &amp;&amp; fileName.indexOf(".css") !== -1) {
+                //read the contents into a string
+                var file = grunt.file.read(absPath);
+                //update the url accordingly
+                file = file.replace("url('../fonts", "url('../../fonts");
+                //use Grunt's file util to write the file with the updated content
+                grunt.file.write(absPath, file);
+            }
+        });
+
+        done();
+    });
+});
+</code></pre>
+
+<p>And we can now use this task just as we did with our <em>appCache</em> task.  Add 'bootstrapFonts' as a task to your build task so that each time you do a new build, which presumably compiles your CSS files, you can update the outputs of your build so the paths are correct!</p>
+
+<hr>
+
+<p>Have your own examples of Everyday Grunt Tasks or ideas on how these could be better?  Please feel free to comment or hit me up on <a href="http://twitter.com/dotNetKnight">twitter</a>!</p>]]></description>
+            <link>http://www.blog.bradleygore.com/2014/10/14/everyday-grunt/</link>
+            <guid isPermaLink="false">3d27a65d-8ba7-405c-a051-612e278e7d30</guid>
+            <category><![CDATA[javascript]]></category>
+            <category><![CDATA[grunt]]></category>
+            <dc:creator><![CDATA[Bradley Gore]]></dc:creator>
+            <pubDate>Tue, 14 Oct 2014 01:32:01 GMT</pubDate>
+        </item>
+        <item>
+            <title><![CDATA[Clean Up Your Gruntfile]]></title>
+            <description><![CDATA[<!-- ![cover](http://gruntjs.com/img/grunt-logo.png) -->
+
+<p>I really don't like looking at a gruntfile with 20 config entries and everything all defined in a gigantic config object.  Today, we'll look at a couple techniques for cleaning up the Gruntfile.</p>
+
+<hr>
+
+<h3 id="cleanuptaskconfigs">Clean up Task Configs</h3>
+
+<p>At the root of your project, create a directory to hold all our grunt-specific stuff.  This will hold configs for tasks we pull in from npm, as well as custom tasks we write.  I'll call mine <strong>grunt-tasks</strong>.  Within that directory, let's create one more named <strong>configs</strong>.</p>
+
+<p>Now we need to start getting all of our configuration data out of our gruntfile.  First, create a javascript file in our grunt-tasks/configs directory <em>for each config entry in your grunt config</em>, this is the object passed into <code>grunt.initConfig({... cfg object ...})</code> in the Gruntfile.  Make sure to name the file exactly the same as the config section.  Fo instance, if my first config entry looked like this, I'd create a file in grunt-tasks/configs/ named <strong>copy.js</strong>:</p>
+
+<pre><code class="language-javascript">grunt.initConfig({  
+    copy: {
+        main: {
+            files: [
+                {src: ['file1.js', 'file2.js'], dest: 'dist/'}
+            ]
+        }
+    }
+});
+</code></pre>
+
+<p>Since we're pulling these configs out into separate files, we'll need to "require" them from within our gruntfile.  So, let's make sure to write our <em>copy.js</em> file appropriately.  We simply want to make it so that <code>module.exports</code> is set to the object that <code>copy</code> is equal to in our Gruntfile snippet above.</p>
+
+<pre><code class="language-javascript">//copy.js - config info for grunt-copy task
+module.exports = {  
+    main: {
+        files: [
+            {src: ['file1.js', 'file2.js'], dest: 'dist/'}
+        ]
+    }
+};
+</code></pre>
+
+<p>Perfect, now we just need to do this for all other config entries in our Gruntfile.</p>
+
+<hr>
+
+<h3 id="updatingthegruntfile">Updating the Gruntfile</h3>
+
+<p>Now that we've pulled the configurations out into their own files, we can remove them all from the <code>grunt.initConfig()</code> call.  We do, however, need to generate the config object inside the Gruntfile by "requiring" each of those files.  Fortunately, Grunt has some <a href="http://gruntjs.com/api/grunt.file">built in file system utils</a>.</p>
+
+<pre><code class="language-javascript">//Gruntfile.js
+module.exports = function(grunt) {  
+    //create initial grunt config and put in any base info needed, i.e. environment
+    var gruntCfg = {
+        env: process.env
+    }; 
+
+    //function to build up a config object from a given directory
+    function buildGruntConfig(path) {
+        //config object to modify
+        var config = {};
+        //will hold the current property we're populating in the config
+        var key;
+
+        //use grunt's file helpers to get all the files in this directory
+        grunt.file.recurse(path, function loadConfigFromFile(absPath, rootDir, subDir, fileName) {
+            //populate the key, i.e. "copy.js" =&gt; "copy" as key
+            key = fileName.replace(/\.js$/, '');
+            //get the value using require
+            var configVal = require(path+fileName);
+            //add the value to the object, with the correct property name
+            config[key] = configVal;
+        });
+
+        return config;
+    }
+
+    //extend gruntCfg with config built dynamically
+    grunt.util._.extend(gruntCfg, buildGruntConfig('./grunt-tasks/configs/');
+
+    //init grunt with our config
+    grunt.initConfig(gruntCfg);
+};
+</code></pre>
+
+<p>Then, any further configs you add to the directory will be picked up and put into the grunt config.  Easy enough, but what about more complex task configs?</p>
+
+<hr>
+
+<h3 id="amorecomplexconfig">A more complex config</h3>
+
+<p>Okay, so this config example is a bit overly simplistic.  <del>Some</del>Many times, you need a more robust config for a task.  One that can have access to grunt, some utility function(s), etc...  Let's look at one method of getting those items injected into our config definitions, and still keeping our files clean and easily maintained.</p>
+
+<hr>
+
+<h5 id="modifycopyjs">Modify copy.js</h5>
+
+<p>First step is to modify our <strong>copy.js</strong> file to export a function that takes in parameters.  We could just name the parameters, <code>function(grunt, util, helper, ...)</code>, but that would be very difficult to deal with when trying to dynamically pull these configs into our grunt config.  So, I've opted for it to just take in 1 parameter: <strong>deps</strong> (for dependencies).</p>
+
+<pre><code class="language-javascript">//copy.js
+module.exports = function(deps) {  
+    //here's where we can check that our deps has what we need.  This one just needs access to the grunt object
+    var grunt = deps.grunt;
+    if(!grunt) {
+        //throw exception, write to log, etc...
+    }
+
+    //returning the same config as before, with the addition of a "process" function called on every file that writes out to the grunt log
+    return {
+        main: {
+            files: [
+                {src: ['file1.js', 'file2.js'], dest: 'dist/'}
+            ],
+            //NEW STUFF
+            options: {
+                process: function(content, srcPath) {
+                    //we can manipulate the file here, or just write updates to the grunt log...
+                    grunt.log.write("Processing file " + srcPath);
+
+                    return content;                    
+                }
+            }
+        }
+    };
+};
+</code></pre>
+
+<hr>
+
+<h5 id="modifygruntfilejs">Modify Gruntfile.js</h5>
+
+<p>Now, we just need to update a couple items in the gruntfile.  First, we need to create an object that holds all dependencies for our configs.  After that, we just need to check to see if the file content returns a function and invoke it with dependencies object if so, otherwise use the object returned.</p>
+
+<pre><code class="language-javascript">//Gruntfile.js
+
+//updates to buildGruntConfig function
+function buildGrundConfig(path) {  
+    //ADDITION: Create config dependencies objecet
+    var configDeps = {
+        grunt: grunt,
+        myFsUtils: require('/utils/fs-utils.js'),
+        //etc...
+    };
+
+    //....... inside grunt.file.recurse
+    var configVal = require(path + fileName);
+    //ADDITION: Check to see if configVal is a function
+    if(typeof configVal === 'function') {
+        //invoke the function with the dependencies
+        configVal = configVal(configDeps);
+    }
+    //..... everything else is same
+}
+</code></pre>
+
+<p>And it's that easy.  We now have our Gruntfile cleaned up and loading its own configs dynamically from the path specified.  Configs can be as simple or as complex as needed, and only affect their own files rather than continuously cluttering up the Gruntfile.</p>]]></description>
+            <link>http://www.blog.bradleygore.com/2014/09/28/clean-up-your-gruntfile/</link>
+            <guid isPermaLink="false">b9c88330-bf75-4acb-ad6a-44c2516d2fb3</guid>
+            <category><![CDATA[javascript]]></category>
+            <category><![CDATA[grunt]]></category>
+            <category><![CDATA[node]]></category>
+            <dc:creator><![CDATA[Bradley Gore]]></dc:creator>
+            <pubDate>Sun, 28 Sep 2014 19:44:27 GMT</pubDate>
+        </item>
+        <item>
+            <title><![CDATA[Angular Unit Testing part 1 - Local Storage]]></title>
+            <description><![CDATA[<p>In my <a href="http://www.blog.bradleygore.com/2014/09/11/local-storage-with-angular-services/">last blog post</a>, we went over one strategy for utilizing HTML5 Local Storage to help provide offline access functionality to an application.  In this tutorial, we'll go over how to build unit tests against an Angular service that works with Local Storage.</p>
+
+<hr>
+
+<h3 id="toolsandsetup">Tools and Setup</h3>
+
+<p>Unit testing is a <strong>huge</strong> topic.  So, for the sake of brevity, I'm going to list out the high-level info on the tools we're using and include links to the resources so you can read more in depth about these tools as needed.</p>
+
+<ul>
+<li>Task Runner (<a href="http://gruntjs.com/">Grunt</a> or <a href="http://gulpjs.com/">Gulp</a>)
+<ul><li>I'm using Grunt</li></ul></li>
+<li>Test Runner (<a href="http://karma-runner.github.io/">Karma</a>)
+<ul><li>We'll be using <a href="https://github.com/karma-runner/grunt-karma">grunt-karma</a> to easily run tests in our grunt task</li></ul></li>
+<li>Test Framework (<a href="http://jasmine.github.io/2.0/introduction.html">Jasmine</a>)
+<ul><li>We'll be using <a href="https://www.npmjs.org/package/karma-jasmine">karma-jasmine</a> to use Jasmine with Karma</li></ul></li>
+</ul>
+
+<p>This tutorial starts off at the point where these things are already set up within the project.</p>
+
+<p><em>Make sure to go into your config section or file for grunt-karma and add Jasmine as the framework:</em></p>
+
+<pre><code class="language-javascript">//grunt config for Karma
+karma: {  
+    options: {
+        frameworks: ['jasmine']
+        ...
+    }
+}
+</code></pre>
+
+<hr>
+
+<h3 id="settingupatesthelper">Setting up a test helper</h3>
+
+<p>It's highly likely that if we're persisting one type of data to local storage, we'll have other services that do the same with other types of data.  For instance, the example I used in the last post was a <code>widgetService</code> and a <code>localStorageWidgetService</code>.  Maybe in that same app you would have data services to work with orders - <code>ordersService</code> and <code>localStorageOrdersService</code>.  That being the case, let's create a common helper that can be used to generate our mocks/spies needed to unit test the <code>localStorage</code> functionality.</p>
+
+<p>Let's create a new folder at the project root directory (or wherever makes the most sense in your application) named <em>test-helpers</em>. Next, create a javascript file in that directory named appropriately.  I chose "localStorageMockAndSpies".</p>
+
+<p>Now let's start coding!  Start off with an IIFE so we don't pollute the global scope: </p>
+
+<pre><code class="language-javascript">(function(self) {
+
+    //helper guts goes here :)
+
+
+    //if module.exports, then this should work with require() if needed - I've not tested this yet though :)
+}((module||{}).exports || window));
+</code></pre>
+
+<p>Next, let's set up a couple variables that are going to be private to this scope.  Since we're mocking the <code>window.localStorage</code> object, we'll need both a data store and an object with a compatible API for interacting with that data store:</p>
+
+<pre><code class="language-javascript">//data store for holding objects
+var localStore = {};
+
+//localStorage mock for interacting with localStore
+var fakeLocalStorage = {  
+    getItem: function (key) {
+        return localStore[key];
+    },
+    setItem: function (key, value) {
+        localStore[key] = val+'';
+    },
+    removeItem: function (key) {
+        delete localStore[key];
+    },
+    clear: function() {
+        localStore = {};
+    }
+}
+</code></pre>
+
+<p><em>This is a bit of a naïve mock because it doesn't worry about size limits and other such aspects of the full <code>window.localStorage</code> API.  We're just testing core functionality here.</em></p>
+
+<p>Next we're going to create the function we'll actually be exposing.  This function will take a window object and will either put our fake in place of the <code>localStorage</code> property, or will use jasmine's <code>.andCallFake(function(){...})</code> functionality to redirect interactions with it.  The reason for this is that PhantomJS has the <code>localStorage</code> object locked down so that we can't overwrite it.  In order to do this, we'll be using Jasmine's <code>spyOn</code> constructs.  There are many cool things you can do with Jasmine's spies - here's a great <a href="http://tobyho.com/2011/12/15/jasmine-spy-cheatsheet/">cheat sheet</a> I found online for them!</p>
+
+<pre><code class="language-javascript">function setupMockLocalStorage(windowObject) {  
+    //first, check to see if the browser is phantom
+    if(windowObject.navigator &amp;&amp; windowObject.navigator.userAgent.match(/Phantom/g)) {
+        //localStorage object being read-only, we have to spy and redirect function calls...
+        spyOn(windowObject.localStorage, 'getItem')
+            .andCallFake(fakeLocalStorage.getItem);
+        spyOn(windowObject.localStorage, 'setItem')
+            .andCallFake(fakeLocalStorage.setItem);
+        spyOn(windowObject.localStorage, 'removeItem')
+            .andCallFake(fakeLocalStorage.removeItem);
+        spyOn(windowObject.localStorage, 'clear')
+            .andCallFake(fakeLocalStorage.clear);    
+    } else {
+        //Anything other than Phantom, we can just replace the definition for windowObject.localStorage with our own custom one
+        Object.defineProperty(windowObject, 'localStorage', {value: fakeLocalStorage, writable: true});
+        //Create our spies so we can tell when functions were called, etc...
+        //using .andCallThrough() tells the spy to allow the function to go ahead and get called rather than redirecting to another function
+        spyOn(windowObject.localStorage, 'getItem')
+            .andCallThrough();
+        spyOn(windowObject.localStorage, 'setItem')
+            .andCallThrough();
+        spyOn(windowObject.localStorage, 'removeItem')
+            .andCallThrough();
+        spyOn(windowObject.localStorage, 'clear')
+            .andCallThrough();
+    }
+}
+
+//here's the object that actually gets exposed to be used by test fixtures
+self.localStorageMockSpy = {  
+    setup: setupMockLocalStorage
+};
+</code></pre>
+
+<p>Last thing to do with our helper is to make sure that our grunt config section for karma pulls in our helper file(s):</p>
+
+<pre><code class="language-javascript">//grunt config for Karma
+karma: {  
+    options: {
+        files: [
+            //list out all files that should be pulled in, including our helpers
+            ...,
+            'test-helpers/*.js',
+            ...
+        ]
+        ...
+    }
+}
+</code></pre>
+
+<hr>
+
+<h3 id="writingourtestfixture">Writing our test fixture</h3>
+
+<p>I typically keep my tests along-side my app files - if I have a <code>localStorageWidgetSvc.js</code> file, I'll have a <code>localStorageWidgetSvc-spec.js</code> file as a sibling to it.  Use the structure that works best for you, and create a test file for the service.  </p>
+
+<p>The first thing we want to put in our test file is a <code>describe</code> block.  This is a Jasmine construct for having a high-level description for the individual tests within.  You may have one <code>describe</code> block per file, or if the functionality is large you may have one per logical chunk of functionality.  This being a fairly simple bit of code, we'll just use one:</p>
+
+<pre><code class="language-javascript">describe('localStorageWidgetService', function() {  
+    //individual tests and stuff go here...
+});
+</code></pre>
+
+<p>Next, let's create some test widget data and variables to hold references to items we'll retrieve via angular's <code>$inject</code> functionality.</p>
+
+<pre><code class="language-javascript">//key to use to access localStorage items:
+//NOTE: This MUST match the key that the localStorageWidgetService uses
+var LS_KEY = 'my.app.widgets';
+
+//will define before each test
+var fakeWidgets;
+
+//these will be injected by the angular DI system
+var localStorageWidgetService, $window;  
+</code></pre>
+
+<p>Now we need to populate those references.  In order to do so, we'll use two other Jasmine constructs: <code>beforeEach</code> &amp; <code>afterEach</code>.  As their names imply, these are fixtures that are used before and after each test.  Before each test runs we want to get dependencies, instantiate objects, etc...  After each test runs we want to clean stuff up.</p>
+
+<pre><code class="language-javascript">beforeEach(function(){  
+    //pull in our angular module for our widgets
+    module('widgets');
+
+    //inject our dependencies.
+    //instead of using $window, use _$window_ so that you can have your local reference named $window.  It will pull in the appropriate item.
+    inject(function (_$window_, _localStorageWidgetService_) {
+        $window = _$window_;
+        localStorageWidgetService = _localStorageWidgetService_;
+    });
+
+    //set up our fake tickets
+    fakeWidgets = [
+        {id: 1, name: 'widget1', price: 15.75},
+        {id: 2, name: 'widget2', price: 22.25},
+        {id: 3, name: 'widget3', price: 50.00}
+    ];
+
+    //now that our $window object is populated, set up the mock and spies for its localStorage property:
+    window.localStorageMockSpy.setup($window);    
+});
+
+afterEach(function(){  
+    localStorageWidgetService.clear();
+});
+</code></pre>
+
+<p>Alright, now we just need to start building out our tests! Jasmine has another construct for defining tests: <code>it('should...', function(){...})</code>.  This is great because you can make you tests read like you'd say them to a person - "it should store widgets in local storage" for instance.  Within each <code>it</code> block, there can be one or more <code>expect</code> statements.  These are the actual tests that pass or fail, and there are a lot of cool things you can do with them.  The <a href="http://jasmine.github.io/2.0/introduction.html">Jasmine</a> documentation is a great resource for diving deeper into these.  Let's finish up by writing a few tests of our own!</p>
+
+<pre><code class="language-javascript">//test that we can set the entire set of widgets with our convenience property
+it('should save all widgets to local storage with convenience property', function () {  
+    localStorageWidgetService.widgets = fakeWidgets;
+    //when we retrieve widgets, it should be what we set it to
+    expect(localStorageWidgetService.widgets).toEqual(fakeWidgets);
+    //Now, since we have a spy we can tell if the underlying localStorage function was actually called and with the correct params.
+    //Remember, localStorage is just [string]KEY:[string]VALUE pairs.  Objects are stringified before persisting into it.
+    expect($window.localStorage.setItem).toHaveBeenCalledWith(LS_KEY, JSON.stringify(fakeWidgets));
+});
+</code></pre>
+
+<p><em>If you are curious about how <code>localStorageWidgetService.widgets</code> works the way it does, see <a href="http://www.blog.bradleygore.com/2014/08/30/cleaner-js-with-object-defineproperty/">this article</a> on using <code>Object.defineProperty</code> to create custom getter/setter functions :)</em></p>
+
+<p>Okay, let's write a couple more!  Let's test the functionality of retrieving a widget by ID, adding/updating a single widget, removing a single widget, and clearing all widgets:</p>
+
+<pre><code class="language-javascript">it('should retrieve a widget by ID', function() {  
+    //put all widgets in localStorage
+    localStorageWidgetService.widgets = fakeWidgets;
+
+    var widget = localStorageWidgetService.getById(fakeWidgets[2].id);
+
+    //test that we got a widget back and that it's the one we want:
+    expect(widget).toBeDefined();
+    //Jasmine even has equality comparators on objects
+    expect(widget).toEqual(fakeWidgets[2]);    
+});
+
+
+it('should allow adding or updating of a single widget', function() {  
+    //put all widgets in localStorage
+    localStorageWidgetService.widgets = fakeWidgets;
+
+    //creat a new widget
+    var newWidget = {id: 25, name: 'newWidget25', price: 22.75};
+
+    //add it to localStorage
+    localStorageWidgetService.add(newWidget);
+
+    //test it out, we should have 4 widgets in localStorage now
+    expect(localStorageWidgetService.widgets.length).toBe(fakeWidgets.length+1);
+
+    //Now, update a widget
+    fakeWidgets[0].price = 17.50;
+    localStorageWidgetService.add(fakeWidgets[0]);
+
+    //retrieve that widget
+    var lsWidget = localStorageWidgetService.getById(fakeWidgets[0].id);
+
+    //test it out - price should match
+    expect(lsWidget.price).toBe(fakeWidgets[0].price);
+
+    //and, we should still have only 4 items in localStorage
+    expect(localStorageWidgetService.widgets.length).toBe(fakeWidgets.length+1);    
+});
+
+
+it('should allow us to remove a single widget by ID', function() {  
+    //put all widgets in localStorage
+    localStorageWidgetService.widgets = fakeWidgets;
+
+    //remove a single item
+    localStorageWidgetService.remove(fakeWidgets[1].id);
+
+    //test it out!
+    var lsDeletedWidget = localStorageWidgetService.getById(fakeWidgets[1].id);
+    //should be null
+    expect(lsDeletedWidget).toBe(null);
+    //we should now have just 2 widgets in localStorage
+    expect(localStorageWidgetService.widgets.length).toBe(fakeWidgets.length-1);    
+});
+
+
+it('should allow us to clear all widgets from localStorage', function() {  
+    //put all widgets in localStorage
+    localStorageWidgetService.widgets = fakeWidgets;
+
+    //tell it to remove them all
+    localStorageWidgetService.clear();
+
+    //test it out - verify function call with our spy!
+    expect($window.localStorage.removeItem).toHaveBeenCalledWith(LS_KEY);
+
+    //see that our .widgets property is now just an empty array
+    expect(localStorageWidgetService.widgets.length).toBe(0);
+});
+</code></pre>
+
+<p>And there we have it - mocking, spying on, and testing an Angular service that interacts with <code>localStorage</code> :)  As with all things programming, this isn't the only way to accomplish the goal. So, feel free to leave a comment with things that could be improved!</p>]]></description>
+            <link>http://www.blog.bradleygore.com/2014/09/18/angular-unit-testing-pt-1-local-storage/</link>
+            <guid isPermaLink="false">62456039-95fd-4bc4-b5ef-320dfe22b917</guid>
+            <category><![CDATA[javascript]]></category>
+            <category><![CDATA[angular]]></category>
+            <category><![CDATA[jasmine]]></category>
+            <category><![CDATA[grunt]]></category>
+            <category><![CDATA[karma]]></category>
+            <category><![CDATA[angular-unit-testing-series]]></category>
+            <dc:creator><![CDATA[Bradley Gore]]></dc:creator>
+            <pubDate>Thu, 18 Sep 2014 02:16:31 GMT</pubDate>
+        </item>
+        <item>
+            <title><![CDATA[Using Local Storage with Angular Services]]></title>
+            <description><![CDATA[<p>With <a href="http://diveintohtml5.info/storage.html">HTML5 Local Storage</a>, there's a lot of potential to bring a bit better user experience to an application.  Here are a few use-cases for local storage:</p>
+
+<ul>
+<li>Long term storage - there's no expiration on local storage data.</li>
+<li>Fallback for API calls - show most recently obtained data and fail gracefully</li>
+<li>User is offline - used in conjunction with <a href="http://diveintohtml5.info/offline.html">HTML5 Cache Manifest</a> can make your app nearly fully-functional offline!</li>
+</ul>
+
+<hr>
+
+<h3 id="usageexamples">Usage Examples</h3>
+
+<p>I am a big fan of the <a href="https://angularjs.org/">AngularJS</a> framework, so I'll be showing examples within the context of an Angular Service.  However, the way you interact with local storage is the same regardless of frameworks.</p>
+
+<p>We'll be looking at a service that interacts with an API for widgets.  We want to incorporate our local storage logic into the app in such a way that the rest of the app only has to know about the widget service, and nothing about local storage.  For the sake of brevity, here are some assumptions:</p>
+
+<ul>
+<li>Another service, named "appConnectivityService", is used to check if we are currently online.</li>
+<li>Our widget service, named "widgetService", exposes the following API:
+<ul><li>get( [id] ) - if no id supplied, entire list is returned</li>
+<li>add( widget )</li>
+<li>update( widget )</li>
+<li>delete( widget )</li></ul></li>
+<li>For brevity, we'll just use the <a href="https://docs.angularjs.org/api/ng/service/$http">$http</a> angular service instead of <a href="https://docs.angularjs.org/api/ngResource/service/$resource">$resource</a>.</li>
+</ul>
+
+<hr>
+
+<h4 id="setuplocalstoragewidgetservice">Set up local storage widget service</h4>
+
+<p>First thing we need to do is to set up the local storage service for our widgets:  </p>
+
+<pre><code class="language-javascript">(function( app ) {
+    app.factory('localStorageWidgetService', ['$window', function ($window) {
+        //determine if local storage is supported
+        var _supportsLocalStorage;
+
+        try {
+            _supportsLocalStorage = ('localStorage' in $window &amp;&amp; $window.localStorage instanceof Storage);
+        } catch (err) {
+            _supportsLocalStorage = false;
+        }
+
+        //create some keys to use when accessing localStorage
+        var lsKeys = {
+            widgets: 'my.app.widgets',
+            //If a user's offline but makes a change, may want to put in localStorage to persist to back end later.  Exercise for reader ;-)
+            changes: 'my.app.widgets.changes'
+        };
+
+        //todo: build methods for service
+
+        //declare our service    
+        var service = {};
+
+        //return the service
+        return service;
+    }]);
+})( angular.module('widgets') );
+</code></pre>
+
+<p>The first thing to notice is that we've created some "keys" (<code>var lsKeys...</code>).  This is because local storage works with key/value pairs.  In order to get or set a value, you must provide a key to use.  The API that local storage provides is pretty simple.  We'll be looking at these methods:</p>
+
+<ul>
+<li>getItem (key) - returns the <strong>string</strong> value for the key or <em>undefined</em></li>
+<li>setItem (key, [<strong>string</strong>]value) - setter for the key</li>
+<li>removeItem (key) - removes the entry</li>
+</ul>
+
+<p>Notice that you can only get/set <strong>string</strong> values with local storage.  Thankfully, there's <code>JSON.parse</code> and <code>JSON.stringify()</code>!</p>
+
+<hr>
+
+<h5 id="logicforretrievingwidgets">Logic for retrieving widgets</h5>
+
+<pre><code class="language-javascript">//private function for parsing widgets
+function parseWidgets(){  
+    if(!_supportsLocalStorage) {
+        return [];
+    }
+
+    var strWidgets = $window.localStorage.getItem(lsKeys.widgets);
+    //will be null if not found
+    if(!!strWidgets) {
+        var widgets = JSON.parse(strWidgets);
+
+        //for consistency, always return an array
+        if(!Array.isArray(widgets)) {
+            widgets = [widgets];
+        }
+
+        return widgets;
+    }
+
+    return [];
+}
+
+function getWidgets(id) {  
+    //get full list of widgets
+    var widgets = parseWidgets();
+    //if we have an id, return the single widget with that id if it's in local storage
+    if((id + '').length &gt; 0) {
+        widgets = widgets.filter(function(w) {
+            return w.id === id;
+        });
+
+        if(widgets.length &gt; 0) {
+            return widgets[0];
+        }
+
+        return null;
+    }
+    //else, return the full list
+    return widgets;
+}
+
+...
+//add functionality to the exposed service
+service.getById = function(id) {  
+    if((id+'').length &gt; 0) {
+        return getWidgets(id);
+    }
+    return null;
+};
+</code></pre>
+
+<p>Notice in the service how we have a private method for parsing the widget string.  This is so we don't have to repeat that logic in other methods.  </p>
+
+<p><em>Also notice that we don't have an exposed way to get <strong>all</strong> of the widgets.  That's coming next :)</em> </p>
+
+<hr>
+
+<h5 id="logicforaddingwidgets">Logic for adding widgets</h5>
+
+<pre><code class="language-javascript">//private method for saving widgets to localStorage
+function saveWidgets(widgets) {  
+    if(!_supportsLocalStorage) {
+        return;
+    }
+    //assumption is that only objects/arrays will be passed in here.
+    $window.localStorage.setItem(keys.widgets, JSON.stringify(widgets));
+}
+
+function addWidget(widget) {  
+    //get all the widgets, because we basically have to overwrite the entire value in localStorage on each update
+    var widgets = parseWidgets();
+    //check to see if we're updating an existing widget, or adding a new one
+    var match = widgets.filter(function(w) {
+        return w.id === widget.id;
+    });
+
+    if(match.length &gt; 0) {
+        widgets[widgets.indexOf(match[0])] = widget;
+    } else {
+        widgets.push(widget);
+    }
+
+    saveWidgets(widgets);
+};
+...
+//expose functionality to service
+service.add = addWidget;
+
+//use Object.defineProperty to create a property with custom get/set functions for dealing with all widgets at once
+Object.defineProperty(service, 'widgets', {  
+    get: function() {
+        return getWidgets();
+    },
+    set: function(widgets) {
+        saveWidgets(widgets);
+    }
+});
+</code></pre>
+
+<p>Notice the use of <code>Object.defineProperty</code> to add custom get/set methods to the property.  This will allow us some syntactic sweetness later on when we try to get/set <em>all</em> of the widgets in local storage.  </p>
+
+<p><em>shameless plug time!</em> <br>
+For more info on <code>Object.defineProperty</code>, check out another tutorial I wrote <a href="http://www.blog.bradleygore.com/2014/08/30/cleaner-js-with-object-defineproperty/">here</a>.</p>
+
+<hr>
+
+<h5 id="finallyaddinlogicforremovingoneorallwidgets">Finally, add in logic for removing one or all widgets</h5>
+
+<pre><code class="language-javascript">//remove a single widget
+function removeWidget(widgetId) {  
+    var widgets = parseWidgets();
+
+    var widget = widgets.filter(function(w) {
+        return w.id === widgetId;
+    });
+
+    if(widget.length &gt; 0) {
+        //remove the deleted widget
+        widgets.splice(widgets.indexOf(widget[0]), 1);
+
+        saveWidgets(widgets);
+    }
+}
+
+...
+//add functionality to service
+service.remove = removeWidget;
+
+//can add clear directly to the service...
+//may not be used by main widgetService, but would be good for if we were setting time limits for how long data can be accessed offline, etc...
+service.clear = function() {  
+    if(!_supportsLocalStorage) {
+        return;
+    }
+
+   $window.localStorage.removeItem(lsKeys.widgets);
+};
+</code></pre>
+
+<hr>
+
+<h4 id="wiringitupinthemainwidgetservice">Wiring it up in the main widget Service</h4>
+
+<p>First, we need to inject the <code>localStorageWidgetService</code> we just created into our main widget service:</p>
+
+<pre><code class="language-javascript">(function( app ) {
+    app.factory('widgetService', ['$http', '$q', 'appConnectivitySvc', 'localStorageWidgetService', function($http, $q, appConnSvc, lsWidgetSvc) {
+        //$q is for creating deferreds and promises
+        //appConnSvc is to tell if we're online or not
+        //lsWidgetSvc is for interacting with localStorage
+
+        //endpoint for our API
+        var endpoint = 'http://www.myServiceEndpoint.com/widgets/';
+
+        var service = {};
+
+        //todo: populate service object
+
+        return service;
+
+    }]);
+})( angular.module('widgets') );
+</code></pre>
+
+<p>Now that we have reference to our new service, let's go through and add in the functionality 1x1 like we did with creating the local storage functionality.</p>
+
+<hr>
+
+<h5 id="gettingwidgets">Getting widgets</h5>
+
+<pre><code class="language-javascript">function getWidgetById(id) {  
+    var defer = $q.defer();
+
+    //convert to string
+    id = id + '';
+
+    if(id.length === 0) {
+        defer.resolve(null);
+    } else if(appConnSvc.isConnected) {
+        $http.get(endpoint + id)
+            .success(function gotWidget(data) {
+                //persist to localStorage
+                lsWidgetSvc.add(data);
+                //fulfill the promise
+                defer.resolve(data);
+            })
+            .error(function noGetWidget(err) {
+                //even if no widgets, we've gracefully handled error and offline state.  If there are widgets, our UI populates with data :)
+                defer.resolve(lsWidgetSvc.getById(id);
+            });
+    } else {
+        defer.resolve(lsWidgetSvc.getById(id));
+    }
+
+    return defer.promise;
+}
+
+function getWidgets() {  
+    var defer = $q.defer;
+
+    if(appConnSvc.isConnected) {
+        $http.get(endpoint)
+            .success(function gotWidgets(data) {
+                //handy set syntax due to custom property get/set functions :)
+                lsWidgetSvc.widgets = data;
+                defer.resolve(data);
+            })
+            .error(function noGetWidgets(err) {
+                //handy get syntax
+                defer.resolve(lsWidgetSvc.widgets);
+            });
+    } else {
+        //and more handy get syntax
+        defer.resolve(lsWidgetSvc.widgets);
+    }
+
+    return defer.promise;
+}
+
+...
+//add functionality to the service
+service.get = function(id) {  
+    if((id+'').length === 0) {
+        return getWidgets();
+    } else {
+        return getWidgetById(id);
+    }
+};
+</code></pre>
+
+<hr>
+
+<h5 id="addorupdateawidget">Add or update a widget</h5>
+
+<pre><code class="language-javascript">function addUpdateWidget(w) {  
+    var defer = $q.defer;
+
+    if(!w) {
+        defer.reject('no widget provided');
+    } else if (appConnSvc.isConnected) {
+        //see if we're adding or updating
+        var adding = (w.id + '').length === 0;
+        var httpMethod = adding ? 'post' : 'put';
+
+        $http[httpMethod](endpoint, w)
+            .success(function addedWidget(data) {
+                //add to localStorage - doesn't matter if it's an insert or update b/c .add takes care of either.
+                lsWidgetSvc.add(w);
+                defer.resolve(data);
+            })
+            .error(function noAddWidget(err) {
+                //nothing to do in localStorage
+                defer.reject(err);
+            });
+    } else {
+        //TODO: Save in localStorage in a way it can be picked up later and pushed to back end when connectivity restored.  Exercise for reader ;-)
+
+        defer.reject('not currently connected');
+    }
+
+    return defer.promise;
+}
+
+...
+//add functionality to service
+service.add = service.update = addUpdateWidget;
+</code></pre>
+
+<hr>
+
+<h5 id="andfinallyaddinfunctionalitytodeleteawidget">And finally, add in functionality to delete a widget</h5>
+
+<pre><code class="language-javascript">    function deleteWidget(id) {
+        var defer = $q.defer;
+
+        id = id+'';
+
+        if(id.length === 0) {
+            defer.reject('no id provided');
+        } else if (appConnSvc.isConnected) {
+            $http.delete(endpoint + id)
+                .success(function deletedWidget(data) {
+                    //remove from localStorage
+                    lsWidgetSvc.remove(id);
+                    defer.resolve(data);
+                })
+                .error function noDeleteWidget(err) {
+                    defer.reject(err);
+                });
+        } else {
+            //TODO: add functionality to capture deletes in localStorage and then persist them when connectivity restored.  Exercise for reader ;-)
+
+            defer.reject('not currently connected');
+        }
+
+        return defer.promise;
+    }
+</code></pre>
+
+<hr>
+
+<p>Well, there you have it!  Now our <code>widgetService</code> is pretty seamlessly utilizing our <code>localStorageWidgetService</code>, and our app's other services and controllers only need to know how to interact with the main <code>widgetService</code>!  </p>
+
+<p>Sometime soon, we may look at how to unit test services that interact with <code>localStorage</code>... that is a fun one ;-)</p>]]></description>
+            <link>http://www.blog.bradleygore.com/2014/09/11/local-storage-with-angular-services/</link>
+            <guid isPermaLink="false">06f8d96f-b6c8-4800-81b9-498ef27f0a9d</guid>
+            <category><![CDATA[javascript]]></category>
+            <category><![CDATA[angular]]></category>
+            <category><![CDATA[localStorage]]></category>
+            <dc:creator><![CDATA[Bradley Gore]]></dc:creator>
+            <pubDate>Thu, 11 Sep 2014 01:34:22 GMT</pubDate>
+        </item>
+        <item>
+            <title><![CDATA[JavaScript: Define Object Properties]]></title>
+            <description><![CDATA[<p>I recently learned about a different way of defining object properties in JavaScript that has helped me write a bit cleaner code: <code>Object.defineProperty</code>. Let's take a look at some basic uses!</p>
+
+<hr>
+
+<p>In this example we have an application that has a service that manages our current user.  However, this application needs to be able to send notifications to the rest of the app when the user has been "set" and when it has been "authenticated".  In an offline context, for instance, there may not be a way to authenticate a user retrieved from a cookie, etc..., so these need to be separate properties and events.  One way to do this is to use the concept of getter/setter functions:</p>
+
+<pre><code class="language-javascript">(function(app, evt){
+    var _user, _isAuthenticated;
+    var authenticatedUserSvc = {};        
+    authenticatedUserSvc.user = function(user) {
+        if(user) {
+            _user = user;
+            evt.triggerEvent("user:set", _user);
+        }
+        return _user;
+    };
+
+    authenticatedUserSvc.isAuthenticated = function(isAuth) {
+        if(!!isAuth &amp;&amp; !_user) {
+            //Prevent the service from being told the user is authenticated if there is no user...
+            throw 'Cannot set isAuthenticated to true if there is no authenticated user defined';
+        }
+
+        if(isAuth.toString().length &gt; 0) {
+            _isAuthenticated = isAuth;
+            if(_isAuthenticated) {
+                   evt.triggerEvent('user:authenticated', _user);
+            }
+        }                
+        return _isAuthenticated;
+    };
+
+    myApp.authenticatedUserSvc = authenticatedUserSvc;
+}(myApp, myEvtSvc));
+</code></pre>
+
+<hr>
+
+<h5 id="sowhatswrongwiththat">So, what's wrong with that?</h5>
+
+<p>While this contains the appropriate validation logic, triggers our events, etc..., it causes its interface to be such that consumers of the service must know to invoke these properties as functions:</p>
+
+<pre><code class="language-javascript">//GET
+if( myApp.authenticatedUserSvc.isAuthenticated() ) {  
+/*do stuff...*/
+}
+//SET
+myApp.authenticatedUserSvc.user({name: 'bradley'});  
+</code></pre>
+
+<p>While there's nothing inherintly wrong with doing it this way, it does cause consumers a couple more keystrokes and, to me, it lessens the readability of the code.  I prefer to read something like <code>user.name = 'Joe'</code> over <code>user.name('Joe')</code> whenever possible.</p>
+
+<p>If we were to refactor this service to use <code>Object.defineProperty</code>, then we could have the best of both worlds!  We can keep our custom logic, and anything interacting with this interface gets to treat it just like any other object!</p>
+
+<hr>
+
+<h5 id="howitworks">How it works:</h5>
+
+<p><code>Object.defineProperty</code> is a function that takes 3 arguments:</p>
+
+<ul>
+<li><strong>object reference</strong> - reference to the object you want to add a property to</li>
+<li><strong>property name</strong> - what you want the property to be called: i.e 'user'</li>
+<li><strong>property definition object</strong> - the definition of the property. This definition can contain multiple properties defining how this new property can be interacted with.</li>
+</ul>
+
+<hr>
+
+<p>Here's an example of applying custom get/set functions to properties:</p>
+
+<pre><code class="language-javascript">(function (app,evt) {
+    var _user, _isAuthenticated, userSvc = {};
+
+    Object.defineProperty(userSvc, 'authenticatedUser', {
+        get: function() {
+            return _user;
+        },
+        set: function(user) {
+            _user = user;
+            evt.triggerEvent('user:set', _user);
+        }
+    });
+
+    Object.defineProperty(userSvc, 'isAuthenticated', {
+        get: function() {
+            return _isAuthenticated;
+        },
+        set: function(isAuthenticated) {
+            if(!!isAuthenticated &amp;&amp; !_user) {
+                throw 'Cannot set isAuthenticated to true if there is no authenticated user defined';
+            }
+
+            _isAuthenticated = isAuthenticated;
+            if(_isAuthenticated) {
+                evt.triggerEvent('user:authenticated', _user);
+            }
+        }
+    });
+}(myApp, myEvtSvc));
+</code></pre>
+
+<p>That's nice.  Now, anything that interacts with this service can use it like this:</p>
+
+<pre><code class="language-javascript">//GET the user:
+var theUser = myApp.authenticatedUserService.user;  
+//SET the user:
+myApp.authenticatedUserService.user = someUserObject;  
+//GET the isAuthenticated value
+if( myApp.authenticatedUserService.isAuthenticated ) {  
+    /*do stuff...*/
+}
+//SET the isAuthenticated value
+myApp.authenticatedUserService.isAuthenticated = true;  
+</code></pre>
+
+<p>This example is just scratching the surface of the capabilities of using <code>Object.defineProperty</code>.  You can use this approach to build <em>read-only</em> properties, properties that are <em>not enumerable</em> when enumerating the properties of an object - <code>for (var prop in someObject) {/*do stuff...*/}</code>, and much more!  For a deeper dive, <a href="https://developer.mozilla.org/">MDN</a> has excellent <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/defineProperty">documentation</a> on <code>Object.defineProperty</code>.</p>]]></description>
+            <link>http://www.blog.bradleygore.com/2014/08/30/cleaner-js-with-object-defineproperty/</link>
+            <guid isPermaLink="false">be675387-d2ca-4092-929d-a0c2f3dc7808</guid>
+            <category><![CDATA[javascript]]></category>
+            <category><![CDATA[Object.defineProperty]]></category>
+            <dc:creator><![CDATA[Bradley Gore]]></dc:creator>
+            <pubDate>Sat, 30 Aug 2014 18:22:12 GMT</pubDate>
+        </item>
+    </channel>
+</rss>
