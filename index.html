@@ -43,9 +43,6 @@
             tagListWorker.addEventListener('message', function processWorkerMsg(e) {
                 var msg = e.data;
                 switch(msg.action) {
-                    case 'parseXML':
-                        parseXML(msg.content);
-                        break;
                     case 'uniqueTags':
                         displayUniqueTags(msg.content);
                         break;
@@ -54,51 +51,6 @@
                         break;
                 };
             });
-
-            /***
-             * @desc        Since the WebWorker doesn't have access to DOMParser,
-             *              we'll have the WebWorker send a message to the main script
-             *              to parse the XML and return the tags
-             */
-            function parseXML(xml) {
-                //here, just put all tags ever...
-                //let the Worker sort them and de-dup them...
-                var allTagsEVAR = [];
-                try {
-                    var xParser, xDoc;
-                    if(window.DOMParser) {
-                        xParser = new DOMParser();
-                        xDoc = xParser.parseFromString(xml, 'text/xml');
-                    } else {
-                        xDoc = new ActiveXObject('Microsoft.XMLDOM');
-                        xDoc.async = false;
-                        xDoc.loadXML(xml);
-                    }
-
-                    //each entry in the RSS feed is in an <item> tag
-                    var items = xDoc.getElementsByTagName('item');
-                    for (var i = 0, len = items.length; i < len; i++) {
-                        var item = items[i];
-
-                        //each <item> contains <category> tag(s) for *EACH* tag
-                        //i.e. <category><![CDATA[someTagName]]></category>
-                        var categories = item.getElementsByTagName('category');
-                        [].map.call(categories, function(cat) {
-                            return cat.childNodes[0].nodeValue;
-                        }).forEach(function(cat) {
-                            allTagsEVAR.push(cat);
-                        });
-                    }
-
-                    console.debug('parseXML allTagsEVAR: ', allTagsEVAR);
-
-                    tagListWorker.postMessage({action: 'tagsParsed', content: allTagsEVAR});
-
-                } catch (e) {
-                    //invalid XML, nothing we can do
-                    tagListWorker.terminate();
-                }
-            }
 
             /***
              * @desc                        Takes all unique tags and displays them in an anchor that links to the appropriate page

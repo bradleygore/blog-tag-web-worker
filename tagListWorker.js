@@ -1,7 +1,7 @@
 /**
  * Created by bgore on 2/7/15.
  */
-var xhr, allTags = [], callbacks = [];
+var xhr, allTags = [], tagCounts = {}, callbacks = [];
 
 self.onmessage = function(e){
     var msg = e.data;
@@ -22,6 +22,10 @@ self.onmessage = function(e){
 
 function loadTags(url, callback){
 
+    if(allTags.length > 0) {
+        return callback();
+    }
+
     if(callback && typeof  callback === 'function') {
         callbacks.push(callback);
     }
@@ -29,6 +33,7 @@ function loadTags(url, callback){
     if(xhr) {
         return;
     }
+
 
     if(typeof XMLHttpRequest !== 'undefined') {
         xhr = new XMLHttpRequest();
@@ -61,8 +66,13 @@ function loadTags(url, callback){
         }
 
         if(xhr.readyState === 4) {
-            console.debug('loadTags xhr: ', xhr);
-            self.postMessage({action: 'parseXML', content: xhr.responseText});
+
+            parseXmlStringToTags(xhr.responseText);
+            //fire all callbacks and then clear the xhr and truncate the callbacks
+            callbacks.forEach(function fireCallbacks(cb) { cb(); });
+            xhr = null;
+            callbacks.length = 0;
+
         }
     }
 
@@ -70,23 +80,34 @@ function loadTags(url, callback){
     xhr.send();
 }
 
-function processParsedTags(tags) {
 
-    //get uniques in the list
-    tags.forEach(function (tag) {
-        tag = tag.toLowerCase();
-        if(allTags.indexOf(tag) === -1) {
-            allTags.push(tag);
+function parseXmlStringToTags(xString) {
+
+    var xCategoryTags = {
+        open: '<category><![CDATA[',
+        close: ']]></category>'
+    };
+
+    var startIdx, endIdx, currentTag, currentTagCount;
+
+    do {
+        startIdx = xString.indexOf(xCategoryTags.open) + xCategoryTags.open.length;
+        endIdx = xString.indexOf(xCategoryTags.close);
+
+        currentTag = xString.substr(startIdx, endIdx - startIdx).toLowerCase();
+
+        if(allTags.indexOf(currentTag) === -1) {
+            allTags.push(currentTag);
         }
-    });
 
-    //sort them
+        currentTagCount = (tagCounts[currentTag] || 0) + 1;
+        tagCounts[currentTag] = currentTagCount;
+
+        xString = xString.substring(endIdx + xCategoryTags.close.length);
+
+    } while (xString.indexOf(xCategoryTags.open) !== -1);
+
     allTags.sort();
-
-    //fire all callbacks and then clear the xhr and truncate the callbacks
-    callbacks.forEach(function fireCallbacks(cb) { cb(); });
-    xhr = null;
-    callbacks.length = 0;
 }
 
 function getUniqueTags() {
