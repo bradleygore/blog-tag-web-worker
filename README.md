@@ -4,3 +4,5 @@ Use a Web Worker and your Blog's RSS feed to get all tags used and then work wit
 This was specifically created so that I could pull all the tags used, and how many times eachw as used, to display lists of most used tags, specific tag types, etc... in by blog.  However, I wanted to put this in a worker so that it's fully async.  This way, I can have a default list of tag items I display, but the list(s) get dynamically updated as soon as the worker is finished downloading and parsing the tags out of the RSS feed XML.
 
 To use the web worker, just do `var tagListWorker = new Worker('tagListWorker.js');` and then you can use the standard methods for communicating with the worker!
+
+To run this example, just pull down the repo and then run `node server.js`. Then hit your `localhost` at the port you're running the server on (default is 8080) and see it populate the `UL` elements with appropriate `LI` and `A` elements!
